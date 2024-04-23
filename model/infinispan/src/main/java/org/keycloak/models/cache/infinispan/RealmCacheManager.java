@@ -20,6 +20,7 @@ package org.keycloak.models.cache.infinispan;
 import org.infinispan.Cache;
 import org.jboss.logging.Logger;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.RealmModel;
 import org.keycloak.models.cache.infinispan.events.InvalidationEvent;
 import org.keycloak.models.cache.infinispan.entities.Revisioned;
 import org.keycloak.models.cache.infinispan.events.RealmCacheInvalidationEvent;
@@ -28,7 +29,9 @@ import org.keycloak.models.cache.infinispan.stream.HasRolePredicate;
 import org.keycloak.models.cache.infinispan.stream.InClientPredicate;
 import org.keycloak.models.cache.infinispan.stream.InGroupPredicate;
 import org.keycloak.models.cache.infinispan.stream.InRealmPredicate;
+import org.wildfly.clustering.marshalling.protostream.reflect.TriFunction;
 
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -151,5 +154,35 @@ public class RealmCacheManager extends CacheManager {
             lock.unlock();
             cacheInteractions.remove(id, lock);
         }
+    }
+
+    /**
+     * Compute a cached realm and ensure that this happens only once with the current Keycloak instance.
+     * Use this to avoid concurrent preparations of a realm in parallel threads. This helps to break the load on
+     * a stampede after a server has started, were a lot of requests come in for the same realm that hasn't been cached yet.
+     * Instead of each request loading the realm in parallel, this lets the first request load the realm, and all
+     * other requests will use the cached realm, which is much more efficient.
+     */
+    public <T> T computeSerialized(KeycloakSession session, String id, RealmModel model, TriFunction<String, RealmModel, KeycloakSession, T> compute) {
+        // this locking is only to ensure that if there is a computation for the same id in the "synchronized" block below,
+        // it will have the same object instance to lock the current execution until the other is finished.
+        ReentrantLock lock = cacheInteractions.computeIfAbsent(id, s -> new ReentrantLock());
+        try {
+            lock.lock();
+            // in case the previous thread has removed the entry in the finally block
+            ReentrantLock existingLock = cacheInteractions.putIfAbsent(id, lock);
+            if (existingLock != lock) {
+                logger.debugf("Concurrent execution detected for realm '%s'.", id);
+            }
+
+            return compute.apply(id, model, session);
+        } finally {
+            lock.unlock();
+            cacheInteractions.remove(id, lock);
+        }
+    }
+
+    public interface TriFunction<A,B,C,T> {
+        T apply( A a, B b, C c);
     }
 }

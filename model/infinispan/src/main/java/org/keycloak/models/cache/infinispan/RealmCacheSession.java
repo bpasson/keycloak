@@ -18,6 +18,7 @@
 package org.keycloak.models.cache.infinispan;
 
 import org.jboss.logging.Logger;
+import org.keycloak.authorization.policy.evaluation.Realm;
 import org.keycloak.client.clienttype.ClientTypeManager;
 import org.keycloak.cluster.ClusterProvider;
 import org.keycloak.common.Profile;
@@ -407,6 +408,32 @@ public class RealmCacheSession implements CacheRealmProvider {
         return realm;
     }
 
+    private RealmModel getRealm(RealmModel backendModel) {
+        return getRealm(backendModel.getId(),backendModel);
+    }
+
+    private RealmModel getRealm(String id, RealmModel backendModel) {
+        RealmModel toCache = backendModel != null && backendModel.getId().equals(id) ? backendModel : null;
+        if (invalidations.contains(id)) {
+            return toCache != null ? toCache : getRealmDelegate().getRealm(id);
+        } else if (managedRealms.containsKey(id)) {
+            return managedRealms.get(id);
+        }
+        CachedRealm cached = cache.get(id, CachedRealm.class);
+        RealmAdapter adapter;
+        if (cached != null) {
+            logger.tracev("by id cache hit: {0}", cached.getName());
+            adapter = new RealmAdapter(session, cached, this);
+        } else {
+            adapter = cache.computeSerialized(session, id, toCache, this::prepareCachedRealm);
+            if (adapter == null) {
+                return null;
+            }
+        }
+        managedRealms.put(id, adapter);
+        return adapter;
+    }
+
     @Override
     public RealmModel getRealm(String id) {
         if (invalidations.contains(id)) {
@@ -420,7 +447,7 @@ public class RealmCacheSession implements CacheRealmProvider {
             logger.tracev("by id cache hit: {0}", cached.getName());
             adapter = new RealmAdapter(session, cached, this);
         } else {
-            adapter = cache.computeSerialized(session, id, this::prepareCachedRealm);
+            adapter = cache.computeSerialized(session, id, null, this::prepareCachedRealm);
             if (adapter == null) {
                 return null;
             }
@@ -429,12 +456,46 @@ public class RealmCacheSession implements CacheRealmProvider {
         return adapter;
     }
 
-    private RealmAdapter prepareCachedRealm(String id, KeycloakSession session) {
+
+
+//    private RealmAdapter prepareCachedRealm(String id, KeycloakSession session) {
+//        CachedRealm cached = cache.get(id, CachedRealm.class);
+//        RealmAdapter adapter;
+//        if (cached == null) {
+//            Long loaded = cache.getCurrentRevision(id);
+//            RealmModel model = getRealmDelegate().getRealm(id);
+//            if (model == null) {
+//                return null;
+//            }
+//            cached = new CachedRealm(loaded, model);
+//            cache.addRevisioned(cached, startupRevision);
+//            adapter = new RealmAdapter(session, cached, this);
+//            CachedRealmModel.RealmCachedEvent event = new CachedRealmModel.RealmCachedEvent() {
+//                @Override
+//                public CachedRealmModel getRealm() {
+//                    return adapter;
+//                }
+//
+//                @Override
+//                public KeycloakSession getKeycloakSession() {
+//                    return session;
+//                }
+//            };
+//            session.getKeycloakSessionFactory().publish(event);
+//        } else {
+//            adapter = new RealmAdapter(session, cached, this);
+//            logger.tracev("by id cache hit after locking: {0}", cached.getName());
+//        }
+//        return adapter;
+//    }
+
+    private RealmAdapter prepareCachedRealm(String id, RealmModel realm, KeycloakSession session) {
+        Optional<RealmModel> optionalRealm = Optional.ofNullable( realm != null && realm.getId().equals(id) ? realm : null );
         CachedRealm cached = cache.get(id, CachedRealm.class);
         RealmAdapter adapter;
         if (cached == null) {
             Long loaded = cache.getCurrentRevision(id);
-            RealmModel model = getRealmDelegate().getRealm(id);
+            RealmModel model = optionalRealm.orElseGet(() -> getRealmDelegate().getRealm(id));
             if (model == null) {
                 return null;
             }
@@ -511,7 +572,7 @@ public class RealmCacheSession implements CacheRealmProvider {
 
     private Stream<RealmModel> getRealms(Stream<RealmModel> backendRealms) {
         // Return cache delegates to ensure cache invalidated during write operations
-        return backendRealms.map(RealmModel::getId).map(this::getRealm);
+        return backendRealms.map(this::getRealm);
     }
 
     @Override
